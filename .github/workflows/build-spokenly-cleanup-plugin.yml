@@ -45,12 +45,20 @@ jobs:
 
       - name: Build plugin target
         run: |
-          xcodebuild -project TypeWhisper.xcodeproj \
-            -target SpokenlyCleanupPlugin \
-            -configuration Release \
-            -arch arm64 \
-            -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
-            CODE_SIGNING_ALLOWED=NO
+          if ! xcodebuild -project TypeWhisper.xcodeproj \
+                -target SpokenlyCleanupPlugin \
+                -configuration Release \
+                -arch arm64 \
+                -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
+                CODE_SIGNING_ALLOWED=NO; then
+            echo "xcodebuild requires -scheme with -derivedDataPath; building via SpokenlyCleanupPlugin scheme..."
+            xcodebuild -project TypeWhisper.xcodeproj \
+              -scheme SpokenlyCleanupPlugin \
+              -configuration Release \
+              -arch arm64 \
+              -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
+              CODE_SIGNING_ALLOWED=NO
+          fi
 
       - name: Verify built bundle contents
         run: |
