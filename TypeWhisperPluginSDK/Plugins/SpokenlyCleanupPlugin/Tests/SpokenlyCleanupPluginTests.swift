@@ -20,4 +20,24 @@ final class SpokenlyCleanupPluginTests: XCTestCase {
         XCTAssertEqual(SpokenlyCleanupPlugin.window(for: 1_600), 2_048)
         XCTAssertEqual(SpokenlyCleanupPlugin.window(for: 2_000), 4_096)
     }
+
+    func testAutoUnloadTimeoutOptions() {
+        XCTAssertEqual(AutoUnloadTimeoutOption.followApp.rawValue, -2)
+        XCTAssertEqual(AutoUnloadTimeoutOption.immediate.rawValue, -1)
+        XCTAssertEqual(AutoUnloadTimeoutOption.never.rawValue, 0)
+        XCTAssertEqual(AutoUnloadTimeoutOption.after2Minutes.rawValue, 120)
+        XCTAssertEqual(AutoUnloadTimeoutOption.after5Minutes.rawValue, 300)
+        XCTAssertEqual(AutoUnloadTimeoutOption.after10Minutes.rawValue, 600)
+        XCTAssertEqual(AutoUnloadTimeoutOption.after30Minutes.rawValue, 1800)
+        XCTAssertEqual(AutoUnloadTimeoutOption.after1Hour.rawValue, 3600)
+    }
+
+    @MainActor
+    func testPluginUnloadModelClearsLoadedState() {
+        let plugin = SpokenlyCleanupPlugin()
+        plugin.unloadModel()
+        XCTAssertFalse(plugin.isModelLoaded)
+        XCTAssertFalse(plugin.isLoading)
+        XCTAssertTrue(plugin.statusText.contains("unloaded"))
+    }
 }

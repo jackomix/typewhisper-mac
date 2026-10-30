@@ -180,6 +180,33 @@ private final class SpokenlyCoreMLSession {
     }
 }
 
+/// Auto-unload duration options matching TypeWhisper preferences.
+public enum AutoUnloadTimeoutOption: Int, CaseIterable, Identifiable, Sendable {
+    case followApp = -2
+    case immediate = -1
+    case never = 0
+    case after2Minutes = 120
+    case after5Minutes = 300
+    case after10Minutes = 600
+    case after30Minutes = 1800
+    case after1Hour = 3600
+
+    public var id: Int { rawValue }
+
+    public var title: String {
+        switch self {
+        case .followApp: return "Match TypeWhisper setting"
+        case .never: return "Never"
+        case .immediate: return "Immediate"
+        case .after2Minutes: return "After 2 minutes"
+        case .after5Minutes: return "After 5 minutes"
+        case .after10Minutes: return "After 10 minutes"
+        case .after30Minutes: return "After 30 minutes"
+        case .after1Hour: return "After 1 hour"
+        }
+    }
+}
+
 @objc(SpokenlyCleanupPlugin)
 final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlugin, @unchecked Sendable {
     static let pluginId = "com.typewhisper.spokenly-cleanup"
@@ -188,33 +215,171 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     let processorName = "Spokenly Cleanup 1 (Core ML)"
     let priority = 800
 
-    @Published private(set) var statusText = "Warming up the bundled on-device model…"
+    @Published var autoUnloadOption: AutoUnloadTimeoutOption = .after5Minutes {
+        didSet {
+            host?.setUserDefault(autoUnloadOption.rawValue, forKey: "autoUnloadSeconds")
+            Task { @MainActor [weak self] in
+                self?.scheduleAutoUnloadIfNeeded()
+            }
+        }
+    }
+
+    @Published private(set) var statusText = "Ready · Model bundled"
     @Published private(set) var isLoading = false
+    @Published private(set) var isModelLoaded = false
+
+    private var host: HostServices?
+    private var eventSubscriptionId: UUID?
 
     @MainActor private var sessions: [Int: Any] = [:]
     @MainActor private var tokenizer: (any Tokenizers.Tokenizer)?
     @MainActor private var loadingTask: Task<Void, Never>?
+    @MainActor private var autoUnloadTask: Task<Void, Never>?
 
     required override init() { super.init() }
 
     func activate(host: HostServices) {
-        // Load and compile the short-dictation Neural Engine path in the
-        // background as soon as the user enables the plugin. No per-dictation
-        // download or model installation step.
+        self.host = host
+        if let savedVal = host.userDefault(forKey: "autoUnloadSeconds") as? Int,
+           let option = AutoUnloadTimeoutOption(rawValue: savedVal) {
+            self.autoUnloadOption = option
+        }
+
+        eventSubscriptionId = host.eventBus.subscribe { [weak self] event in
+            await self?.handleEvent(event)
+        }
+
         Task { @MainActor [weak self] in
-            await self?.warmUp()
+            guard let self else { return }
+            if self.effectiveAutoUnloadSeconds == 0 {
+                await self.warmUp()
+            } else {
+                self.statusText = "Ready · Model bundled (prewarms on dictation)"
+            }
         }
     }
 
     func deactivate() {
+        if let id = eventSubscriptionId {
+            host?.eventBus.unsubscribe(id: id)
+            eventSubscriptionId = nil
+        }
         Task { @MainActor [weak self] in
+            self?.autoUnloadTask?.cancel()
+            self?.autoUnloadTask = nil
             self?.loadingTask?.cancel()
             self?.loadingTask = nil
             self?.sessions.removeAll()
             self?.tokenizer = nil
             self?.isLoading = false
+            self?.isModelLoaded = false
             self?.statusText = "Model unloaded."
         }
+    }
+
+    private func handleEvent(_ event: TypeWhisperEvent) async {
+        switch event {
+        case .recordingStarted:
+            await prewarmForDictation()
+        default:
+            break
+        }
+    }
+
+    @MainActor
+    private func prewarmForDictation() {
+        guard #available(macOS 15.0, *) else { return }
+        autoUnloadTask?.cancel()
+        autoUnloadTask = nil
+
+        guard !isModelLoaded, loadingTask == nil else { return }
+
+        statusText = "Prewarming model on Neural Engine while you speak…"
+        loadingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isLoading = true
+            do {
+                let tokenizer = try await self.loadTokenizer()
+                let session = try await self.loadSession(window: 512, tokenizer: tokenizer)
+                _ = try session.clean("Hello there.")
+                self.isModelLoaded = true
+                self.statusText = "Ready · model bundled, warmed, and running locally"
+            } catch {
+                self.isModelLoaded = false
+                self.statusText = "Could not prepare the bundled model: \(error.localizedDescription)"
+            }
+            self.isLoading = false
+            self.loadingTask = nil
+        }
+    }
+
+    var effectiveAutoUnloadSeconds: Int {
+        switch autoUnloadOption {
+        case .followApp:
+            let defaults = UserDefaults.standard
+            if defaults.object(forKey: "modelAutoUnloadSeconds") != nil {
+                return defaults.integer(forKey: "modelAutoUnloadSeconds")
+            }
+            return 600
+        case .immediate:
+            return -1
+        case .never:
+            return 0
+        case .after2Minutes:
+            return 120
+        case .after5Minutes:
+            return 300
+        case .after10Minutes:
+            return 600
+        case .after30Minutes:
+            return 1800
+        case .after1Hour:
+            return 3600
+        }
+    }
+
+    @MainActor
+    func scheduleAutoUnloadIfNeeded() {
+        autoUnloadTask?.cancel()
+        autoUnloadTask = nil
+
+        guard isModelLoaded else { return }
+
+        let seconds = effectiveAutoUnloadSeconds
+        guard seconds != 0 else { return }
+
+        if seconds == -1 {
+            autoUnloadTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                self?.unloadModel()
+            }
+        } else {
+            autoUnloadTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled else { return }
+                self?.unloadModel()
+            }
+        }
+    }
+
+    @objc func triggerAutoUnload() {
+        Task { @MainActor [weak self] in
+            self?.unloadModel()
+        }
+    }
+
+    @MainActor
+    func unloadModel() {
+        autoUnloadTask?.cancel()
+        autoUnloadTask = nil
+        loadingTask?.cancel()
+        loadingTask = nil
+        sessions.removeAll()
+        tokenizer = nil
+        isLoading = false
+        isModelLoaded = false
+        statusText = "Model unloaded from memory (will prewarm on dictation)"
     }
 
     @MainActor
@@ -224,16 +389,31 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
 
     @MainActor
     func process(text: String, context: PostProcessingContext) async throws -> String {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
-        if let language = context.language, !Self.supportsLanguage(language) { return text }
+        autoUnloadTask?.cancel()
+        autoUnloadTask = nil
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            scheduleAutoUnloadIfNeeded()
+            return text
+        }
+        if let language = context.language, !Self.supportsLanguage(language) {
+            scheduleAutoUnloadIfNeeded()
+            return text
+        }
         guard #available(macOS 15.0, *) else { return text }
         if let loadingTask { await loadingTask.value }
+
+        defer {
+            scheduleAutoUnloadIfNeeded()
+        }
+
         do {
             let tokenizer = try await loadTokenizer()
             let estimatedPromptTokens = tokenizer.encode(text: Self.prompt(text: text), addSpecialTokens: true).count
             let window = Self.window(for: estimatedPromptTokens)
             let session = try await loadSession(window: window, tokenizer: tokenizer)
             let cleaned = try session.clean(text)
+            isModelLoaded = true
             statusText = "Ready · Core ML Neural Engine · local only"
             return cleaned
         } catch {
@@ -262,8 +442,11 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
                 // The first actual prediction triggers Core ML's one-time ANE
                 // compilation. Doing it here keeps that work off the first dictation.
                 _ = try session.clean("Hello there.")
+                self.isModelLoaded = true
                 self.statusText = "Ready · model bundled, warmed, and running locally"
+                self.scheduleAutoUnloadIfNeeded()
             } catch {
+                self.isModelLoaded = false
                 self.statusText = "Could not prepare the bundled model: \(error.localizedDescription)"
             }
             self.isLoading = false
@@ -341,14 +524,36 @@ private struct SpokenlyCleanupSettingsView: View {
                 .font(.headline)
             Text("Fast, local cleanup of dictated text: fillers and repeats removed, spoken corrections applied, and punctuation, capitalization, and numbers formatted. The model is included in this plugin; transcripts are never sent to a server.")
                 .fixedSize(horizontal: false, vertical: true)
-            Text("The bundled Core ML model runs on Apple’s Neural Engine. TypeWhisper starts warming it when the plugin is enabled, so dictation does not wait for a model download.")
+            Text("The bundled Core ML model runs on Apple’s Neural Engine. It automatically prewarms in the background when you start speaking and unloads from memory when idle.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            Picker("Auto-unload model", selection: $plugin.autoUnloadOption) {
+                Text(AutoUnloadTimeoutOption.followApp.title).tag(AutoUnloadTimeoutOption.followApp)
+                Divider()
+                Text(AutoUnloadTimeoutOption.never.title).tag(AutoUnloadTimeoutOption.never)
+                Text(AutoUnloadTimeoutOption.immediate.title).tag(AutoUnloadTimeoutOption.immediate)
+                Text(AutoUnloadTimeoutOption.after2Minutes.title).tag(AutoUnloadTimeoutOption.after2Minutes)
+                Text(AutoUnloadTimeoutOption.after5Minutes.title).tag(AutoUnloadTimeoutOption.after5Minutes)
+                Text(AutoUnloadTimeoutOption.after10Minutes.title).tag(AutoUnloadTimeoutOption.after10Minutes)
+                Text(AutoUnloadTimeoutOption.after30Minutes.title).tag(AutoUnloadTimeoutOption.after30Minutes)
+                Text(AutoUnloadTimeoutOption.after1Hour.title).tag(AutoUnloadTimeoutOption.after1Hour)
+            }
+            .pickerStyle(.menu)
+
             HStack(spacing: 10) {
-                Button(plugin.isLoading ? "Preparing…" : "Warm up model") {
+                Button(plugin.isLoading ? "Preparing…" : (plugin.isModelLoaded ? "Model loaded" : "Warm up model")) {
                     Task { await plugin.warmUp() }
                 }
-                .disabled(plugin.isLoading)
+                .disabled(plugin.isLoading || plugin.isModelLoaded)
+
+                if plugin.isModelLoaded {
+                    Button("Unload model") {
+                        plugin.unloadModel()
+                    }
+                    .disabled(plugin.isLoading)
+                }
+
                 ProgressView().controlSize(.small).opacity(plugin.isLoading ? 1 : 0)
             }
             Text(plugin.statusText)
