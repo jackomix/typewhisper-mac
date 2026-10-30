@@ -84,7 +84,7 @@ private final class SpokenlyCoreMLSession {
         let inputIDs = try MLMultiArray(shape: [1, 16], dataType: .int32)
         let positions = try MLMultiArray(shape: [16], dataType: .int32)
         let answer = try MLMultiArray(shape: [1], dataType: .int32)
-        let mask = try MLMultiArray(shape: [1, 1, 1, window], dataType: .float16)
+        let mask = try MLMultiArray(shape: [1, 1, 1, NSNumber(value: window)], dataType: .float16)
 
         let inputPointer = inputIDs.dataPointer.assumingMemoryBound(to: Int32.self)
         let positionPointer = positions.dataPointer.assumingMemoryBound(to: Int32.self)
