@@ -1,0 +1,134 @@
+name: Build Spokenly Cleanup Plugin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Spokenly Cleanup Plugin
+    runs-on: xcode-27
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "27.1"
+
+      - name: Ensure Metal toolchain
+        run: |
+          if [ -f scripts/ensure_metal_toolchain.sh ]; then
+            bash scripts/ensure_metal_toolchain.sh
+          fi
+
+      - name: Validate source manifest
+        run: |
+          python3 - << 'EOF'
+          import json, sys
+
+          manifest_path = "TypeWhisperPluginSDK/Plugins/SpokenlyCleanupPlugin/manifest.json"
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              m = json.load(f)
+
+          assert m.get("id") == "com.typewhisper.spokenly-cleanup", f"Unexpected id: {m.get('id')}"
+          assert m.get("principalClass") == "SpokenlyCleanupPlugin", f"Unexpected principalClass: {m.get('principalClass')}"
+          assert str(m.get("minOSVersion")) == "15.0", f"Unexpected minOSVersion: {m.get('minOSVersion')}"
+          assert m.get("locality") == "local", f"Unexpected locality: {m.get('locality')}"
+          assert m.get("requiresAPIKey") is False, f"Unexpected requiresAPIKey: {m.get('requiresAPIKey')}"
+          print("Source manifest.json validated successfully.")
+          EOF
+
+      - name: Run Plugin Unit Tests
+        run: |
+          swift test --package-path TypeWhisperPluginSDK --filter SpokenlyCleanupPluginTests
+
+      - name: Build plugin target
+        run: |
+          xcodebuild -project TypeWhisper.xcodeproj \
+            -target SpokenlyCleanupPlugin \
+            -configuration Release \
+            -arch arm64 \
+            -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Verify built bundle contents
+        run: |
+          BUNDLE_DIR="$RUNNER_TEMP/TypeWhisperDerivedData/Build/Products/Release/SpokenlyCleanupPlugin.bundle"
+          if [ ! -d "$BUNDLE_DIR" ]; then
+            echo "Error: Bundle not found at $BUNDLE_DIR" >&2
+            exit 1
+          fi
+
+          echo "Bundle found at: $BUNDLE_DIR"
+
+          # 1. Contents/Resources/manifest.json
+          MANIFEST="$BUNDLE_DIR/Contents/Resources/manifest.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Error: Missing manifest.json in bundle" >&2
+            exit 1
+          fi
+
+          # 2. Contents/Resources/SpokenlyCleanupResources/CleanupNeuralEngine.mlmodelc/weights/weight.bin
+          WEIGHT_BIN="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/CleanupNeuralEngine.mlmodelc/weights/weight.bin"
+          if [ ! -f "$WEIGHT_BIN" ]; then
+            echo "Error: Missing weight.bin in bundle" >&2
+            exit 1
+          fi
+          WEIGHT_SIZE=$(stat -f "%z" "$WEIGHT_BIN" 2>/dev/null || stat -c "%s" "$WEIGHT_BIN")
+          echo "weight.bin size: $WEIGHT_SIZE bytes"
+          if [ "$WEIGHT_SIZE" -lt 700000000 ]; then
+            echo "Error: weight.bin size is less than 700 MB ($WEIGHT_SIZE bytes)" >&2
+            exit 1
+          fi
+
+          # 3. Contents/Resources/SpokenlyCleanupResources/tokenizer.json
+          TOKENIZER="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/tokenizer.json"
+          if [ ! -s "$TOKENIZER" ]; then
+            echo "Error: Missing or empty tokenizer.json in bundle" >&2
+            exit 1
+          fi
+
+          # 4. Contents/Resources/SpokenlyCleanupResources/LICENSE and NOTICE
+          LICENSE_FILE="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/LICENSE"
+          NOTICE_FILE="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/NOTICE"
+          if [ ! -f "$LICENSE_FILE" ]; then
+            echo "Error: Missing LICENSE in bundle" >&2
+            exit 1
+          fi
+          if [ ! -f "$NOTICE_FILE" ]; then
+            echo "Error: Missing NOTICE in bundle" >&2
+            exit 1
+          fi
+
+          # 5. Manifest validation in built bundle
+          python3 - << 'EOF'
+          import json, os, sys
+
+          bundle = os.environ.get("BUNDLE_DIR")
+          manifest_path = os.path.join(bundle, "Contents", "Resources", "manifest.json")
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          assert str(data.get("minOSVersion")) == "15.0", f"Invalid minOSVersion: {data.get('minOSVersion')}"
+          assert data.get("principalClass") == "SpokenlyCleanupPlugin", f"Invalid principalClass: {data.get('principalClass')}"
+          assert data.get("locality") == "local", f"Invalid locality: {data.get('locality')}"
+          assert data.get("requiresAPIKey") is False, "requiresAPIKey must be false"
+          print("Built bundle manifest.json verified: minOSVersion=15.0, principalClass=SpokenlyCleanupPlugin, build-time only local model.")
+          EOF
+
+          echo "All bundle verifications passed successfully!"
+        env:
+          BUNDLE_DIR: ${{ runner.temp }}/TypeWhisperDerivedData/Build/Products/Release/SpokenlyCleanupPlugin.bundle
+
+      - name: Stage bundle artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact-stage"
+          cp -R "$RUNNER_TEMP/TypeWhisperDerivedData/Build/Products/Release/SpokenlyCleanupPlugin.bundle" "$RUNNER_TEMP/artifact-stage/"
+
+      - name: Upload plugin bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpokenlyCleanupPlugin-macOS-arm64
+          path: ${{ runner.temp }}/artifact-stage/SpokenlyCleanupPlugin.bundl*
+          if-no-files-found: error

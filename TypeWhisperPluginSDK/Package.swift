@@ -21,6 +21,7 @@ let package = Package(
         .package(url: "https://github.com/TypeWhisper/mlx-audio-swift.git", revision: "1fb13b441c1ad8aae4a23f6a2223e03e5e5b1738"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", exact: "0.10.1"),
         .package(url: "https://github.com/huggingface/swift-jinja.git", exact: "2.5.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers.git", exact: "1.3.4"),
         .package(url: "https://github.com/ml-explore/mlx-swift.git", exact: "0.31.6"),
         .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git", from: "1.24.2"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
@@ -257,6 +258,18 @@ let package = Package(
             dependencies: ["TypeWhisperPluginSDK"],
             path: "Plugins/FillerWordsPlugin",
             exclude: ["Tests"],
+            resources: [
+                .process("manifest.json"),
+            ]
+        ),
+        .target(
+            name: "SpokenlyCleanupPlugin",
+            dependencies: [
+                "TypeWhisperPluginSDK",
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            path: "Plugins/SpokenlyCleanupPlugin",
+            exclude: ["README.md", "Tests"],
             resources: [
                 .process("manifest.json"),
             ]
@@ -699,6 +712,11 @@ let package = Package(
                 "FillerWordsPlugin",
             ],
             path: "Plugins/FillerWordsPlugin/Tests"
+        ),
+        .testTarget(
+            name: "SpokenlyCleanupPluginTests",
+            dependencies: ["SpokenlyCleanupPlugin"],
+            path: "Plugins/SpokenlyCleanupPlugin/Tests"
         ),
         .testTarget(
             name: "LanguageDetectionPluginTests",

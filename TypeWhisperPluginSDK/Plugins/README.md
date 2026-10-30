@@ -7,7 +7,9 @@ TypeWhisper supports external plugins as macOS `.bundle` files. Place compiled b
 ```
 
 The first-party plugin sources that ship with this repository now live under
-`TypeWhisperPluginSDK/Plugins/`.
+`TypeWhisperPluginSDK/Plugins/`. The on-device **Spokenly Cleanup** post-processor is at
+[`SpokenlyCleanupPlugin/`](SpokenlyCleanupPlugin/README.md); it has its own Xcode bundle target
+and Swift Package target. Build it with `xcodebuild -project TypeWhisper.xcodeproj -target SpokenlyCleanupPlugin -configuration Release`.
 
 ## Plugin Types
 

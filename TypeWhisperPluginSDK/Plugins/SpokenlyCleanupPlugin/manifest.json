@@ -1,0 +1,17 @@
+{
+  "id": "com.typewhisper.spokenly-cleanup",
+  "name": "Spokenly Cleanup",
+  "version": "1.0.0",
+  "minHostVersion": "1.7.0",
+  "sdkCompatibilityVersion": "v1",
+  "minOSVersion": "15.0",
+  "supportedArchitectures": ["arm64"],
+  "author": "Community",
+  "description": "Fast, private dictation cleanup with the Spokenly Cleanup 1 model running locally on Apple silicon.",
+  "principalClass": "SpokenlyCleanupPlugin",
+  "requiresAPIKey": false,
+  "locality": "local",
+  "iconSystemName": "text.badge.checkmark",
+  "category": "post-processor",
+  "detailsURL": "https://huggingface.co/spokenly/cleanup-1"
+}
