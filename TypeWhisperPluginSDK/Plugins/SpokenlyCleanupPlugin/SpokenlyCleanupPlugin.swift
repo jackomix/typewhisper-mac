@@ -319,8 +319,8 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     }
 
     static func window(for promptTokens: Int) -> Int {
-        if promptTokens + 256 <= 512 { return 512 }
-        if promptTokens + 256 <= 2_048 { return 2_048 }
+        if promptTokens + 256 < 512 { return 512 }
+        if promptTokens + 256 < 2_048 { return 2_048 }
         return 4_096
     }
 }
