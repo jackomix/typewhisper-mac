@@ -457,7 +457,11 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
                     if !sentence.isEmpty {
                         let isLastSentence = (sIndex == matches.count - 1 && match.range.location + match.range.length >= nsString.length)
                         let sep = isLastSentence ? paragraphSeparator : " "
-                        chunks.append(TextChunk(text: sentence, trailingSeparator: sep))
+                        if sentence.count > 200 {
+                            chunks.append(contentsOf: splitLongSentenceIntoClauses(text: sentence, trailingSeparator: sep))
+                        } else {
+                            chunks.append(TextChunk(text: sentence, trailingSeparator: sep))
+                        }
                     }
                     lastIndex = match.range.location + match.range.length
                 }
@@ -465,15 +469,73 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
                 if lastIndex < nsString.length {
                     let remaining = nsString.substring(from: lastIndex).trimmingCharacters(in: .whitespaces)
                     if !remaining.isEmpty {
-                        chunks.append(TextChunk(text: remaining, trailingSeparator: paragraphSeparator))
+                        if remaining.count > 200 {
+                            chunks.append(contentsOf: splitLongSentenceIntoClauses(text: remaining, trailingSeparator: paragraphSeparator))
+                        } else {
+                            chunks.append(TextChunk(text: remaining, trailingSeparator: paragraphSeparator))
+                        }
                     }
                 }
             } else {
-                chunks.append(TextChunk(text: pTrimmed, trailingSeparator: paragraphSeparator))
+                chunks.append(contentsOf: splitLongSentenceIntoClauses(text: pTrimmed, trailingSeparator: paragraphSeparator))
             }
         }
 
         return chunks.isEmpty ? [TextChunk(text: trimmed, trailingSeparator: "")] : chunks
+    }
+
+    private static func splitLongSentenceIntoClauses(text: String, trailingSeparator: String) -> [TextChunk] {
+        guard text.count > 200 else {
+            return [TextChunk(text: text, trailingSeparator: trailingSeparator)]
+        }
+
+        // Split long run-on sentences at clause punctuation or natural speech conjunctions
+        let pattern = #"(?<=[;:\u2014,]|\s(?:and|but|because|so|then|which|while|although))\s+"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            let nsString = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsString.length))
+            if !matches.isEmpty {
+                var clauseChunks: [TextChunk] = []
+                var lastIndex = 0
+                for (cIndex, match) in matches.enumerated() {
+                    let range = NSRange(location: lastIndex, length: match.range.location - lastIndex)
+                    let clause = nsString.substring(with: range).trimmingCharacters(in: .whitespaces)
+                    if !clause.isEmpty {
+                        let isLast = (cIndex == matches.count - 1 && match.range.location + match.range.length >= nsString.length)
+                        let sep = isLast ? trailingSeparator : " "
+                        clauseChunks.append(TextChunk(text: clause, trailingSeparator: sep))
+                    }
+                    lastIndex = match.range.location + match.range.length
+                }
+                if lastIndex < nsString.length {
+                    let remaining = nsString.substring(from: lastIndex).trimmingCharacters(in: .whitespaces)
+                    if !remaining.isEmpty {
+                        clauseChunks.append(TextChunk(text: remaining, trailingSeparator: trailingSeparator))
+                    }
+                }
+                if !clauseChunks.isEmpty {
+                    return clauseChunks
+                }
+            }
+        }
+
+        // Word-boundary fallback if no conjunctions or clause marks exist
+        var chunks: [TextChunk] = []
+        var remaining = text
+        while remaining.count > 200 {
+            let prefix = String(remaining.prefix(200))
+            if let lastSpace = prefix.lastIndex(where: { $0.isWhitespace }) {
+                let chunkText = String(remaining[..<lastSpace]).trimmingCharacters(in: .whitespaces)
+                chunks.append(TextChunk(text: chunkText, trailingSeparator: " "))
+                remaining = String(remaining[remaining.index(after: lastSpace)...]).trimmingCharacters(in: .whitespaces)
+            } else {
+                break
+            }
+        }
+        if !remaining.isEmpty {
+            chunks.append(TextChunk(text: remaining, trailingSeparator: trailingSeparator))
+        }
+        return chunks.isEmpty ? [TextChunk(text: text, trailingSeparator: trailingSeparator)] : chunks
     }
 
     @MainActor

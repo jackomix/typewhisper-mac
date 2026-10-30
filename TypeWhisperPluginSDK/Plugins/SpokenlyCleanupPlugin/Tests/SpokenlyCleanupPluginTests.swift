@@ -59,4 +59,15 @@ final class SpokenlyCleanupPluginTests: XCTestCase {
         let joined = chunks.map { $0.text + $0.trailingSeparator }.joined().trimmingCharacters(in: .whitespaces)
         XCTAssertEqual(joined, combined)
     }
+
+    func testSplitIntoCleanableChunksSegmentsLongRunOnSentenceWithoutPeriods() {
+        let runOn = "I was talking with the team earlier this morning about the roadmap and we agreed that we need to finalize the mockups before the end of this week, because the client is expecting an update on Monday, so please make sure everyone is ready"
+        let chunks = SpokenlyCleanupPlugin.splitIntoCleanableChunks(text: runOn)
+        XCTAssertGreaterThan(chunks.count, 1)
+        for chunk in chunks {
+            XCTAssertLessThanOrEqual(chunk.text.count, 220)
+        }
+        let joined = chunks.map { $0.text + $0.trailingSeparator }.joined().trimmingCharacters(in: .whitespaces)
+        XCTAssertEqual(joined, runOn)
+    }
 }
