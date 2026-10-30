@@ -191,7 +191,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     @Published private(set) var statusText = "Warming up the bundled on-device model…"
     @Published private(set) var isLoading = false
 
-    @MainActor @available(macOS 15.0, *) private var sessions: [Int: SpokenlyCoreMLSession] = [:]
+    @MainActor private var sessions: [Int: Any] = [:]
     @MainActor private var tokenizer: (any Tokenizers.Tokenizer)?
     @MainActor private var loadingTask: Task<Void, Never>?
 
@@ -210,7 +210,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
         Task { @MainActor [weak self] in
             self?.loadingTask?.cancel()
             self?.loadingTask = nil
-            if #available(macOS 15.0, *) { self?.sessions.removeAll() }
+            self?.sessions.removeAll()
             self?.tokenizer = nil
             self?.isLoading = false
             self?.statusText = "Model unloaded."
@@ -288,7 +288,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     @MainActor
     @available(macOS 15.0, *)
     private func loadSession(window: Int, tokenizer: any Tokenizers.Tokenizer) async throws -> SpokenlyCoreMLSession {
-        if let existing = sessions[window] { return existing }
+        if let existing = sessions[window] as? SpokenlyCoreMLSession { return existing }
         let modelURL = try Self.resourceFolder().appendingPathComponent("CleanupNeuralEngine.mlmodelc", isDirectory: true)
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
             throw CleanupModelError.missingBundledModel
