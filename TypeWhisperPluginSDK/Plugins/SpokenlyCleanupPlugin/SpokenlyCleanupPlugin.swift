@@ -29,11 +29,21 @@ private final class SpokenlyCoreMLSession {
     private var cachedTokenCount = 0
     private let endTokenID = 151_643 // Qwen3 <|endoftext|>
 
-    init(model: MLModel, tokenizer: any Tokenizers.Tokenizer, window: Int) {
+    // Preallocated buffers to eliminate thousands of heap allocations per prediction
+    private let inputIDs: MLMultiArray
+    private let positions: MLMultiArray
+    private let answer: MLMultiArray
+    private let mask: MLMultiArray
+
+    init(model: MLModel, tokenizer: any Tokenizers.Tokenizer, window: Int) throws {
         self.model = model
         self.tokenizer = tokenizer
         self.window = window
         self.state = model.makeState()
+        self.inputIDs = try MLMultiArray(shape: [1, 16], dataType: .int32)
+        self.positions = try MLMultiArray(shape: [16], dataType: .int32)
+        self.answer = try MLMultiArray(shape: [1], dataType: .int32)
+        self.mask = try MLMultiArray(shape: [1, 1, 1, NSNumber(value: window)], dataType: .float16)
     }
 
     func clean(_ text: String) throws -> String {
@@ -81,11 +91,6 @@ private final class SpokenlyCoreMLSession {
     }
 
     private func predict(block: [Int], answerRow: Int, position: Int) throws -> Int {
-        let inputIDs = try MLMultiArray(shape: [1, 16], dataType: .int32)
-        let positions = try MLMultiArray(shape: [16], dataType: .int32)
-        let answer = try MLMultiArray(shape: [1], dataType: .int32)
-        let mask = try MLMultiArray(shape: [1, 1, 1, NSNumber(value: window)], dataType: .float16)
-
         let inputPointer = inputIDs.dataPointer.assumingMemoryBound(to: Int32.self)
         let positionPointer = positions.dataPointer.assumingMemoryBound(to: Int32.self)
         for index in 0..<16 {
@@ -136,43 +141,34 @@ private final class SpokenlyCoreMLSession {
             let destinationStrides = cache.strides.map(\.intValue)
             let source = output.dataPointer.assumingMemoryBound(to: Float16.self)
             let destination = cache.dataPointer.assumingMemoryBound(to: Float16.self)
+            let byteSize = 128 * MemoryLayout<Float16>.stride
 
             if dropCount > 0 {
                 for layer in 0..<28 {
+                    let layerDst = layer * destinationStrides[0]
                     for head in 0..<8 {
+                        let headDst = layerDst + head * destinationStrides[1]
                         for token in 0..<retainedCount {
                             let oldToken = token + dropCount
-                            for dimension in 0..<128 {
-                                let from = layer * destinationStrides[0]
-                                    + head * destinationStrides[1]
-                                    + oldToken * destinationStrides[2]
-                                    + dimension * destinationStrides[3]
-                                let to = layer * destinationStrides[0]
-                                    + head * destinationStrides[1]
-                                    + token * destinationStrides[2]
-                                    + dimension * destinationStrides[3]
-                                destination[to] = destination[from]
-                            }
+                            let from = headDst + oldToken * destinationStrides[2]
+                            let to = headDst + token * destinationStrides[2]
+                            memcpy(destination + to, destination + from, byteSize)
                         }
                     }
                 }
             }
 
             for layer in 0..<28 {
+                let layerSrc = layer * sourceStrides[0]
+                let layerDst = layer * destinationStrides[0]
                 for head in 0..<8 {
+                    let headSrc = layerSrc + head * sourceStrides[1]
+                    let headDst = layerDst + head * destinationStrides[1]
                     for token in 0..<count {
                         let targetToken = retainedCount + token
-                        for dimension in 0..<128 {
-                            let from = layer * sourceStrides[0]
-                                + head * sourceStrides[1]
-                                + token * sourceStrides[2]
-                                + dimension * sourceStrides[3]
-                            let to = layer * destinationStrides[0]
-                                + head * destinationStrides[1]
-                                + targetToken * destinationStrides[2]
-                                + dimension * destinationStrides[3]
-                            destination[to] = source[from]
-                        }
+                        let from = headSrc + token * sourceStrides[2]
+                        let to = headDst + targetToken * destinationStrides[2]
+                        memcpy(destination + to, source + from, byteSize)
                     }
                 }
             }
@@ -230,6 +226,8 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
 
     private var host: HostServices?
     private var eventSubscriptionId: UUID?
+    private var isSpeculativeCleaning = false
+    private var speculativeCleanCache: [String: String] = [:]
 
     @MainActor private var sessions: [Int: Any] = [:]
     @MainActor private var tokenizer: (any Tokenizers.Tokenizer)?
@@ -271,6 +269,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
             self?.loadingTask = nil
             self?.sessions.removeAll()
             self?.tokenizer = nil
+            self?.speculativeCleanCache.removeAll()
             self?.isLoading = false
             self?.isModelLoaded = false
             self?.statusText = "Model unloaded."
@@ -280,9 +279,41 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     private func handleEvent(_ event: TypeWhisperEvent) async {
         switch event {
         case .recordingStarted:
+            await MainActor.run { [weak self] in
+                self?.speculativeCleanCache.removeAll()
+            }
             await prewarmForDictation()
+        case .partialTranscriptionUpdate(let payload):
+            await handlePartialTranscription(payload.text)
         default:
             break
+        }
+    }
+
+    @MainActor
+    private func handlePartialTranscription(_ text: String) async {
+        guard isModelLoaded, !isLoading, !isSpeculativeCleaning else { return }
+        guard #available(macOS 15.0, *) else { return }
+
+        let chunks = Self.splitIntoCleanableChunks(text: text)
+        guard chunks.count > 1 else { return }
+
+        // The last chunk is still actively being spoken; take completed earlier chunks
+        let completed = chunks.dropLast()
+        guard let candidate = completed.first(where: { speculativeCleanCache[$0.text] == nil }) else {
+            return
+        }
+
+        isSpeculativeCleaning = true
+        defer { isSpeculativeCleaning = false }
+
+        do {
+            let tokenizer = try await loadTokenizer()
+            let session = try await loadSession(window: 512, tokenizer: tokenizer)
+            let cleaned = try session.clean(candidate.text)
+            speculativeCleanCache[candidate.text] = cleaned
+        } catch {
+            // Fallback cleanly to final pass if speculative step encounters an issue
         }
     }
 
@@ -377,6 +408,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
         loadingTask = nil
         sessions.removeAll()
         tokenizer = nil
+        speculativeCleanCache.removeAll()
         isLoading = false
         isModelLoaded = false
         statusText = "Model unloaded from memory (will prewarm on dictation)"
@@ -385,6 +417,63 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
     @MainActor
     var settingsView: AnyView? {
         AnyView(SpokenlyCleanupSettingsView(plugin: self))
+    }
+
+    struct TextChunk: Equatable {
+        let text: String
+        let trailingSeparator: String
+    }
+
+    static func splitIntoCleanableChunks(text: String) -> [TextChunk] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 200 else {
+            return [TextChunk(text: trimmed, trailingSeparator: "")]
+        }
+
+        var chunks: [TextChunk] = []
+        let paragraphs = trimmed.components(separatedBy: "\n")
+
+        for (pIndex, paragraph) in paragraphs.enumerated() {
+            let pTrimmed = paragraph.trimmingCharacters(in: .whitespaces)
+            guard !pTrimmed.isEmpty else { continue }
+            let isLastParagraph = (pIndex == paragraphs.count - 1)
+            let paragraphSeparator = isLastParagraph ? "" : "\n\n"
+
+            if pTrimmed.count <= 200 {
+                chunks.append(TextChunk(text: pTrimmed, trailingSeparator: paragraphSeparator))
+                continue
+            }
+
+            // Split on sentence boundaries (. ? ! followed by whitespace)
+            let pattern = #"(?<=[.?!])\s+"#
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let nsString = pTrimmed as NSString
+                let matches = regex.matches(in: pTrimmed, range: NSRange(location: 0, length: nsString.length))
+                var lastIndex = 0
+
+                for (sIndex, match) in matches.enumerated() {
+                    let range = NSRange(location: lastIndex, length: match.range.location - lastIndex)
+                    let sentence = nsString.substring(with: range).trimmingCharacters(in: .whitespaces)
+                    if !sentence.isEmpty {
+                        let isLastSentence = (sIndex == matches.count - 1 && match.range.location + match.range.length >= nsString.length)
+                        let sep = isLastSentence ? paragraphSeparator : " "
+                        chunks.append(TextChunk(text: sentence, trailingSeparator: sep))
+                    }
+                    lastIndex = match.range.location + match.range.length
+                }
+
+                if lastIndex < nsString.length {
+                    let remaining = nsString.substring(from: lastIndex).trimmingCharacters(in: .whitespaces)
+                    if !remaining.isEmpty {
+                        chunks.append(TextChunk(text: remaining, trailingSeparator: paragraphSeparator))
+                    }
+                }
+            } else {
+                chunks.append(TextChunk(text: pTrimmed, trailingSeparator: paragraphSeparator))
+            }
+        }
+
+        return chunks.isEmpty ? [TextChunk(text: trimmed, trailingSeparator: "")] : chunks
     }
 
     @MainActor
@@ -409,13 +498,28 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
 
         do {
             let tokenizer = try await loadTokenizer()
-            let estimatedPromptTokens = tokenizer.encode(text: Self.prompt(text: text), addSpecialTokens: true).count
-            let window = Self.window(for: estimatedPromptTokens)
-            let session = try await loadSession(window: window, tokenizer: tokenizer)
-            let cleaned = try session.clean(text)
+            let chunks = Self.splitIntoCleanableChunks(text: text)
+            var result = ""
+
+            for chunk in chunks {
+                let cleanedChunk: String
+                if let cached = speculativeCleanCache[chunk.text] {
+                    cleanedChunk = cached
+                } else {
+                    let estimatedPromptTokens = tokenizer.encode(text: Self.prompt(text: chunk.text), addSpecialTokens: true).count
+                    let window = Self.window(for: estimatedPromptTokens)
+                    let session = try await loadSession(window: window, tokenizer: tokenizer)
+                    cleanedChunk = try session.clean(chunk.text)
+                    speculativeCleanCache[chunk.text] = cleanedChunk
+                }
+
+                result += cleanedChunk + chunk.trailingSeparator
+            }
+
+            let finalResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
             isModelLoaded = true
             statusText = "Ready · Core ML Neural Engine · local only"
-            return cleaned
+            return finalResult.isEmpty ? text : finalResult
         } catch {
             statusText = "Cleanup unavailable; original text kept. \(error.localizedDescription)"
             return text
@@ -487,7 +591,7 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
         configuration.computeUnits = .cpuAndNeuralEngine
         configuration.functionName = "window\(window)"
         let model = try MLModel(contentsOf: modelURL, configuration: configuration)
-        let session = SpokenlyCoreMLSession(model: model, tokenizer: tokenizer, window: window)
+        let session = try SpokenlyCoreMLSession(model: model, tokenizer: tokenizer, window: window)
         sessions[window] = session
         return session
     }

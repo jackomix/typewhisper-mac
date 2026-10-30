@@ -40,4 +40,23 @@ final class SpokenlyCleanupPluginTests: XCTestCase {
         XCTAssertFalse(plugin.isLoading)
         XCTAssertTrue(plugin.statusText.contains("unloaded"))
     }
+
+    func testSplitIntoCleanableChunksKeepsShortTextIntact() {
+        let text = "Hello there, meet me on Friday."
+        let chunks = SpokenlyCleanupPlugin.splitIntoCleanableChunks(text: text)
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks.first?.text, text)
+    }
+
+    func testSplitIntoCleanableChunksSegmentsLongParagraph() {
+        let sentence1 = "This is the first long sentence with plenty of detail to test the segmentation logic."
+        let sentence2 = "This is the second long sentence that carries another thought and should be separated."
+        let sentence3 = "And this is the third sentence completing the paragraph."
+        let combined = "\(sentence1) \(sentence2) \(sentence3)"
+
+        let chunks = SpokenlyCleanupPlugin.splitIntoCleanableChunks(text: combined)
+        XCTAssertGreaterThan(chunks.count, 1)
+        let joined = chunks.map { $0.text + $0.trailingSeparator }.joined().trimmingCharacters(in: .whitespaces)
+        XCTAssertEqual(joined, combined)
+    }
 }
