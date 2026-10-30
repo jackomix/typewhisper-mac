@@ -50,14 +50,16 @@ jobs:
                 -configuration Release \
                 -arch arm64 \
                 -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
-                CODE_SIGNING_ALLOWED=NO; then
+                CODE_SIGNING_ALLOWED=NO \
+                ENABLE_USER_SCRIPT_SANDBOXING=NO; then
             echo "xcodebuild requires -scheme with -derivedDataPath; building via SpokenlyCleanupPlugin scheme..."
             xcodebuild -project TypeWhisper.xcodeproj \
               -scheme SpokenlyCleanupPlugin \
               -configuration Release \
               -arch arm64 \
               -derivedDataPath "$RUNNER_TEMP/TypeWhisperDerivedData" \
-              CODE_SIGNING_ALLOWED=NO
+              CODE_SIGNING_ALLOWED=NO \
+              ENABLE_USER_SCRIPT_SANDBOXING=NO
           fi
 
       - name: Verify built bundle contents
