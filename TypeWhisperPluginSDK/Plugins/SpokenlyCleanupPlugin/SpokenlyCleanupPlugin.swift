@@ -280,6 +280,13 @@ final class SpokenlyCleanupPlugin: NSObject, ObservableObject, PostProcessorPlug
         guard FileManager.default.fileExists(atPath: resourceFolder.appendingPathComponent("tokenizer.json").path) else {
             throw CleanupModelError.missingTokenizer
         }
+        let configURL = resourceFolder.appendingPathComponent("tokenizer_config.json")
+        if !FileManager.default.fileExists(atPath: configURL.path) {
+            let defaultConfig = """
+            {"add_prefix_space":false,"backend":"tokenizers","bos_token":null,"clean_up_tokenization_spaces":false,"eos_token":"<|endoftext|>","errors":"replace","is_local":true,"local_files_only":false,"model_max_length":131072,"pad_token":"<|endoftext|>","split_special_tokens":false,"tokenizer_class":"Qwen2Tokenizer","unk_token":null}
+            """
+            try? defaultConfig.data(using: .utf8)?.write(to: configURL)
+        }
         let loaded = try await AutoTokenizer.from(modelFolder: resourceFolder)
         tokenizer = loaded
         return loaded

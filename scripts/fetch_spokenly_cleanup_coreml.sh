@@ -47,5 +47,16 @@ for path in "${files[@]}"; do
   ditto "${CACHE_ROOT}/${path}" "${DESTINATION}/${path}"
 done
 
+# tokenizer_config.json is required by AutoTokenizer (from spokenly/cleanup-1)
+tok_cfg="${CACHE_ROOT}/tokenizer_config.json"
+if [[ ! -s "${tok_cfg}" ]]; then
+  echo "Downloading bundled Spokenly Cleanup asset: tokenizer_config.json"
+  curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+    "https://huggingface.co/spokenly/cleanup-1/resolve/a83ba762e3c4ab6a3a20814ec68050f381d92cf8/tokenizer_config.json?download=true" \
+    --output "${tok_cfg}.partial"
+  mv "${tok_cfg}.partial" "${tok_cfg}"
+fi
+ditto "${tok_cfg}" "${DESTINATION}/tokenizer_config.json"
+
 touch "${DESTINATION}/model-bundle.stamp"
 echo "Spokenly Cleanup Core ML model bundled in ${DESTINATION}"

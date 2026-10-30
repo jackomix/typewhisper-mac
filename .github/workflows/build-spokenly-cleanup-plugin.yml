@@ -92,10 +92,15 @@ jobs:
             exit 1
           fi
 
-          # 3. Contents/Resources/SpokenlyCleanupResources/tokenizer.json
+          # 3. Contents/Resources/SpokenlyCleanupResources/tokenizer.json and tokenizer_config.json
           TOKENIZER="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/tokenizer.json"
           if [ ! -s "$TOKENIZER" ]; then
             echo "Error: Missing or empty tokenizer.json in bundle" >&2
+            exit 1
+          fi
+          TOKENIZER_CONFIG="$BUNDLE_DIR/Contents/Resources/SpokenlyCleanupResources/tokenizer_config.json"
+          if [ ! -s "$TOKENIZER_CONFIG" ]; then
+            echo "Error: Missing or empty tokenizer_config.json in bundle" >&2
             exit 1
           fi
 
